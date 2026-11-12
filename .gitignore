@@ -1,0 +1,16 @@
+## Ignore Visual Studio / .NET temporary and build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Rider / Resharper / VSCode
+.vs/
+.idea/
+.vscode/
+
+## Uploads/uploads directory if desired (can keep folder with .gitkeep)
+uploads/proofs/*
+!uploads/proofs/.gitkeep
