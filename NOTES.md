@@ -1,322 +1,478 @@
-# InvoiceFlow — Project Notes & Setup Guide
+# InvoiceFlow — API Documentation & Frontend Integration Guide
 
-## What I Need From You
-
-> [!IMPORTANT]
-> Please update the following values before running the app.
-
-### 1. SMTP — Sender Email
-In `appsettings.json`, set your Gmail address as `Smtp:SenderEmail`:
-```json
-"Smtp": {
-  "SenderEmail": "your-actual-gmail@gmail.com"
-}
-```
-The App Password (`msaaqkwlhdebqwmw`) is already filled in.
-
-### 2. Payment Details (stored on your User profile, not in config)
-Payment instructions shown on every invoice PDF and email are pulled directly from your user account. After registering, update your bank account number and JazzCash/Easypaisa number via:
-
-```
-PUT /api/users/{id}
-```
-```json
-{
-  "name": "Zain Baig",
-  "bank": "HBL",
-  "bankAccountNumber": "1234-5678-9012",
-  "digitalWallet": "0300-1234567"
-}
-```
-Supported banks: `HBL`, `ASKARI`, `ALFALAH`, `UBL`, `MCB`
-
-### 3. App Base URL
-When you deploy, set:
-```json
-"App": {
-  "BaseUrl": "https://yourdomain.com"
-}
-```
-During local development `https://localhost:5001` is fine.
-
----
-
-## Project Structure
-
-```
-InvoiceFlow/
-├── Controllers/
-│   ├── UserController.cs          — Auth (login) + User CRUD
-│   ├── ClientController.cs        — CRUD + bulk import
-│   ├── InvoiceController.cs       — CRUD + PDF + monthly report
-│   ├── PaymentProofController.cs  — List + review proofs
-│   └── PublicInvoiceController.cs — No-auth client endpoints
-│
-├── Services/
-│   ├── Interfaces/
-│   │   ├── IJwtService.cs
-│   │   ├── IUserService.cs        — Auth + user management (merged)
-│   │   ├── IClientService.cs
-│   │   ├── IInvoiceService.cs
-│   │   ├── IEmailService.cs
-│   │   └── IPaymentProofService.cs
-│   ├── JwtService.cs
-│   ├── UserService.cs             — Auth + user management (merged)
-│   ├── ClientService.cs
-│   ├── InvoiceService.cs
-│   ├── EmailService.cs
-│   ├── PaymentProofService.cs
-│   └── ReminderJob.cs             — Hangfire daily job
-│
-├── Models/
-│   ├── Entities/
-│   │   ├── User.cs
-│   │   ├── Client.cs
-│   │   ├── Invoice.cs
-│   │   ├── PaymentProof.cs
-│   │   └── EmailLogs.cs
-│   ├── Enums/
-│   │   ├── Bank.cs                — HBL, ASKARI, ALFALAH, UBL, MCB
-│   │   ├── InvoiceStatus.cs
-│   │   ├── EmailStatus.cs
-│   │   ├── EmailTypes.cs
-│   │   ├── PaymentFileType.cs
-│   │   └── ReviewStatus.cs
-│   └── DTOs/
-│       ├── UserDtos.cs            — Auth DTOs + User DTOs (merged)
-│       ├── ClientDtos.cs
-│       ├── InvoiceDtos.cs
-│       └── PaymentProofDtos.cs
-│
-├── Data/
-│   ├── ApplicationDbContext.cs
-│   └── Configurations/
-│
-├── appsettings.json
-└── Program.cs
-```
-
----
-
-## API Endpoints
-
-### Users & Auth  _(merged into one controller at `/api/users`)_
-
-| Method | URL | Auth | Description |
-|--------|-----|------|-------------|
-| POST | `/api/users/login` | No | Login — returns JWT token |
-| POST | `/api/users` | No* | Register a new accountant / owner |
-| GET | `/api/users/me` | JWT | Get the currently logged-in user's profile |
-| PUT | `/api/users/{id}` | JWT | Update name, bank account, digital wallet |
-
-> \* `POST /api/users` is open for first-time setup. Restrict it in production once your account is created.
-
-**Login body:**
-```json
-{
-  "email": "zain@123gmail.com",
-  "password": "yourpassword"
-}
-```
-
-**Login response:**
-```json
-{
-  "name": "Zain Baig",
-  "email": "zain@123gmail.com",
-  "token": "<JWT>"
-}
-```
-
-**Create / Register body:**
-```json
-{
-  "name": "Zain Baig",
-  "email": "zain@example.com",
-  "password": "StrongPassword123",
-  "bank": "HBL",
-  "bankAccountNumber": "1234-5678-9012",
-  "digitalWallet": "0300-1234567"
-}
-```
-
-**Update User body** (`PUT /api/users/{id}` — does **not** change password):
-```json
-{
-  "name": "Zain Baig",
-  "bank": "MCB",
-  "bankAccountNumber": "9999-0000-1111",
-  "digitalWallet": "0321-9876543"
-}
-```
-
----
-
-### Clients
-
-| Method | URL | Auth | Description |
-|--------|-----|------|-------------|
-| GET | `/api/clients` | JWT | List all clients |
-| GET | `/api/clients/{id}` | JWT | Get client by ID |
-| POST | `/api/clients` | JWT | Add a single client |
-| PUT | `/api/clients/{id}` | JWT | Update client |
-| DELETE | `/api/clients/{id}` | JWT | Delete client |
-| POST | `/api/clients/import` | JWT | Bulk import from CSV or Excel file |
-
-**Add Client body:**
-```json
-{
-  "name": "Ahmed Ali",
-  "email": "ahmed@example.com",
-  "phone": "0300-1234567",
-  "company": "ACME Ltd",
-  "city": "Karachi",
-  "isReminderEnabled": true
-}
-```
-
-**Bulk Import** — `POST /api/clients/import`
-- Send as `multipart/form-data`, key: `file`
-- Accepted formats: `.csv`, `.xlsx`, `.xls`
-
-**CSV format** (header row required):
-```
-Name,Email,Phone,Company,City,IsReminderEnabled
-Ahmed Ali,ahmed@gmail.com,0300-1234567,ACME Ltd,Karachi,true
-Sara Khan,sara@gmail.com,0311-9876543,,,true
-```
-
----
-
-### Invoices
-
-| Method | URL | Auth | Description |
-|--------|-----|------|-------------|
-| GET | `/api/invoices` | JWT | List all invoices |
-| GET | `/api/invoices/{id}` | JWT | Get invoice by ID |
-| POST | `/api/invoices` | JWT | Create invoice (auto-generates PDF + sends email) |
-| PATCH | `/api/invoices/{id}/mark-paid` | JWT | Mark invoice as paid |
-| DELETE | `/api/invoices/{id}` | JWT | Delete invoice |
-| GET | `/api/invoices/{id}/pdf` | JWT | Download invoice PDF |
-| GET | `/api/invoices/report?year=2024&month=11` | JWT | Download monthly Excel report |
-
-**Create Invoice body:**
-```json
-{
-  "clientId": 1,
-  "description": "Web development services - November 2024",
-  "amount": 50000,
-  "issueDate": "2024-11-01",
-  "dueDate": "2024-11-15",
-  "isRecurring": false
-}
-```
-
-> [!NOTE]
-> Payment instructions on the PDF and email are built automatically from the **invoice creator's** `bank`, `bankAccountNumber`, and `digitalWallet` fields — no manual config needed.
-
----
-
-### Public Endpoints _(Client-facing — no login required)_
-
-| Method | URL | Auth | Description |
-|--------|-----|------|-------------|
-| GET | `/api/public/invoices/{token}` | No | View invoice details (safe fields only) |
-| GET | `/api/public/invoices/{token}/pdf` | No | Download invoice PDF |
-| POST | `/api/public/invoices/{token}/proof` | No | Upload proof of payment |
-
-The `{token}` is the URL-safe Base64 value embedded in the client's email link (e.g. `https://yourapp.com/pay/Xk3v9...`).
-
-**Upload Proof** — `POST /api/public/invoices/{token}/proof`
-- Send as `multipart/form-data`, key: `file`
-- Accepted formats: `.jpg`, `.png`, `.pdf`
-- Max size: **5 MB**
-- On success: invoice status changes to `ProofSubmitted`, reminders stop.
+## 1. Quick Setup & Configuration
 
 > [!IMPORTANT]
-> The API always returns `404` for both invalid **and** expired tokens — attackers learn nothing.
+> Configure the following in `appsettings.json` before starting the application:
+> - `Smtp:SenderEmail`: Your Gmail address (App Password is preconfigured).
+> - `App:BaseUrl`: Frontend base URL (e.g., `http://localhost:3000` or `https://yourdomain.com`) so emailed payment links direct to the frontend payment page (`/pay/{token}`).
 
 ---
 
-### Payment Proofs _(Accountant)_
+## 2. Authentication Architecture (For Frontend Developers)
 
-| Method | URL | Auth | Description |
-|--------|-----|------|-------------|
-| GET | `/api/payment-proofs/invoice/{invoiceId}` | JWT | List all proofs for an invoice |
-| PATCH | `/api/payment-proofs/{id}/review` | JWT | Approve or reject a proof |
-
-**Review body:**
-```json
-{ "approved": true }
-```
-```json
-{ "approved": false, "rejectReason": "Screenshot is blurry, please resubmit." }
-```
-- Approving → invoice status becomes `Paid`
-- Rejecting → invoice status becomes `Rejected`, reminders can resume
+- **Authentication Method:** JWT Bearer Token.
+- **Header Format:**
+  ```http
+  Authorization: Bearer <token>
+  ```
+- **Token Storage:** Store the returned JWT token securely (e.g., `localStorage`, `sessionStorage`, or in-memory state / HttpOnly cookies).
+- **Per-User Isolation:**
+  - All protected endpoints automatically extract the logged-in user's identity from the JWT claims.
+  - Clients, Invoices, Reports, and Proof Reviews are strictly filtered so users only access their own data.
+  - Public payment endpoints (`/api/public/invoices/...`) require **no token/login**; client access is validated via a cryptographically secure token embedded in the URL.
 
 ---
 
-## How the Payment Token Works
+## 3. Enums Reference
 
-1. When an invoice is created, the backend generates **32 cryptographically random bytes** (`RandomNumberGenerator.GetBytes`).
-2. The raw token (URL-safe Base64) is **never stored** in the database.
-3. A **SHA-256 hash** of the token is stored in `Invoice.PaymentTokenHash`.
-4. The raw token is embedded in the email link: `https://yourapp.com/pay/{token}`.
-5. When the client opens the link, the page calls `GET /api/public/invoices/{token}`.
-6. The API hashes the incoming token, finds the matching row, checks expiry, and returns only safe fields (no internal IDs).
-7. A database breach does **not** expose working links — only useless hashes.
-8. Token expiry: **30 days** after invoice creation (`TokenExpiresAt`).
+Use these string representations in JSON requests and responses:
 
----
-
-## Hangfire Reminder Schedule
-
-The `ReminderJob` runs every day at **8:00 AM UTC** (`0 8 * * *`).
-
-| Condition | Action |
-|-----------|--------|
-| Due in exactly 3 days | Gentle reminder email + PDF |
-| 1–3 days overdue | First reminder email + PDF |
-| 4+ days overdue | Firm second reminder email + PDF |
-| 1st of the month | Auto-create new invoices for all recurring templates |
-
-> [!NOTE]
-> Reminders are skipped if `Client.IsReminderEnabled = false` or if the invoice status is `Paid` or `ProofSubmitted`.
-
-Access the Hangfire dashboard at: **`/hangfire`** (no auth in dev — add an `IDashboardAuthorizationFilter` before going live).
-
----
-
-## Running Locally
-
-```bash
-cd InvoiceFlow
-dotnet run
+### `Bank`
+```typescript
+type Bank = "HBL" | "ASKARI" | "ALFALAH" | "UBL" | "MCB";
 ```
 
-> [!NOTE]
-> Hangfire creates its own schema tables in SQL Server automatically on first run. No EF migration needed for Hangfire.
+### `InvoiceStatus`
+```typescript
+type InvoiceStatus = "Pending" | "ProofSubmitted" | "Paid" | "Rejected";
+```
 
-> [!IMPORTANT]
-> You **do** need to run an EF migration for the new `Bank`, `BankAccountNumber`, and `DigitalWallet` columns added to the `Users` table:
-> ```bash
-> dotnet ef migrations add AddUserBankFields
-> dotnet ef database update
-> ```
+### `ReviewStatus`
+```typescript
+type ReviewStatus = "Pending" | "Approved" | "Rejected";
+```
+
+### `PaymentFileType`
+```typescript
+type PaymentFileType = "jpg" | "png" | "pdf";
+```
 
 ---
 
-## NuGet Packages
+## 4. Endpoints Specification
 
-| Package | Purpose |
-|---------|---------|
-| `BCrypt.Net-Next` | Password hashing |
-| `Microsoft.AspNetCore.Authentication.JwtBearer` | JWT auth middleware |
-| `Microsoft.EntityFrameworkCore.SqlServer` | EF Core + SQL Server |
-| `Hangfire.AspNetCore` | Background jobs + dashboard |
-| `Hangfire.SqlServer` | SQL Server job storage |
-| `MailKit` | SMTP email sending (Gmail) |
-| `QuestPDF` | Invoice PDF generation |
-| `ClosedXML` | Monthly Excel report export |
-| `ExcelDataReader` + `ExcelDataReader.DataSet` | Bulk client import from Excel |
+### 👤 Users & Authentication (`/api/users`)
+
+#### 1. Login
+- **URL:** `POST /api/users/login`
+- **Auth Required:** No
+- **Request Body:**
+  ```json
+  {
+    "email": "zain@123gmail.com",
+    "password": "yourpassword"
+  }
+  ```
+- **Response (200 OK):**
+  ```json
+  {
+    "name": "Zain Baig",
+    "email": "zain@123gmail.com",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
+  ```
+- **Error Responses:**
+  - `400 Bad Request`: Email and password are required.
+  - `401 Unauthorized`: Invalid email or password.
+
+---
+
+#### 2. Register Account
+- **URL:** `POST /api/users`
+- **Auth Required:** No (Open for registration / onboarding)
+- **Request Body:**
+  ```json
+  {
+    "name": "Zain Baig",
+    "email": "zain@example.com",
+    "password": "StrongPassword123",
+    "bank": "HBL",
+    "bankAccountNumber": "1234-5678-9012",
+    "digitalWallet": "0300-1234567"
+  }
+  ```
+- **Response (201 Created):**
+  ```json
+  {
+    "id": 1,
+    "name": "Zain Baig",
+    "email": "zain@example.com",
+    "bank": "HBL",
+    "bankAccountNumber": "1234-5678-9012",
+    "digitalWallet": "0300-1234567"
+  }
+  ```
+
+---
+
+#### 3. Get Current User Profile
+- **URL:** `GET /api/users/me`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):**
+  ```json
+  {
+    "id": 1,
+    "name": "Zain Baig",
+    "email": "zain@example.com",
+    "bank": "HBL",
+    "bankAccountNumber": "1234-5678-9012",
+    "digitalWallet": "0300-1234567"
+  }
+  ```
+- **Error Responses:**
+  - `401 Unauthorized`
+  - `404 Not Found`
+
+---
+
+#### 4. Update Profile & Payment Details
+- **URL:** `PUT /api/users/{id}`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Note:** Updates user details such as bank name, account number, and digital wallet (JazzCash/Easypaisa). Invoices and PDFs automatically pull these instructions.
+- **Request Body:**
+  ```json
+  {
+    "name": "Zain Baig",
+    "bank": "MCB",
+    "bankAccountNumber": "9999-0000-1111",
+    "digitalWallet": "0321-9876543"
+  }
+  ```
+- **Response (200 OK):**
+  ```json
+  {
+    "id": 1,
+    "name": "Zain Baig",
+    "email": "zain@example.com",
+    "bank": "MCB",
+    "bankAccountNumber": "9999-0000-1111",
+    "digitalWallet": "0321-9876543"
+  }
+  ```
+
+---
+
+### 👥 Clients Management (`/api/clients`)
+
+> All client operations are scoped to the authenticated user.
+
+#### 1. List Clients
+- **URL:** `GET /api/clients`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):**
+  ```json
+  [
+    {
+      "id": 1,
+      "name": "Ahmed Ali",
+      "email": "ahmed@example.com",
+      "phone": "0300-1234567",
+      "company": "ACME Ltd",
+      "city": "Karachi",
+      "isReminderEnabled": true
+    }
+  ]
+  ```
+
+---
+
+#### 2. Get Single Client
+- **URL:** `GET /api/clients/{id}`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):** Client object.
+- **Response (404 Not Found):** If ID doesn't exist or belongs to another user.
+
+---
+
+#### 3. Create Client
+- **URL:** `POST /api/clients`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Request Body:**
+  ```json
+  {
+    "name": "Ahmed Ali",
+    "email": "ahmed@example.com",
+    "phone": "0300-1234567",
+    "company": "ACME Ltd",
+    "city": "Karachi",
+    "isReminderEnabled": true
+  }
+  ```
+- **Response (201 Created):** Created client object with assigned `id`.
+
+---
+
+#### 4. Update Client
+- **URL:** `PUT /api/clients/{id}`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Request Body:**
+  ```json
+  {
+    "name": "Ahmed Ali",
+    "email": "ahmed_updated@example.com",
+    "phone": "0300-1234567",
+    "company": "ACME Global",
+    "city": "Lahore",
+    "isReminderEnabled": false
+  }
+  ```
+- **Response (200 OK):** Updated client object.
+
+---
+
+#### 5. Delete Client
+- **URL:** `DELETE /api/clients/{id}`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (204 No Content):** Deleted successfully.
+- **Response (404 Not Found):** Client not found or not owned by user.
+
+---
+
+#### 6. Bulk Import Clients
+- **URL:** `POST /api/clients/import`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Content-Type:** `multipart/form-data`
+- **Form Data Field:** `file` (Supports `.csv`, `.xlsx`, `.xls`)
+- **CSV Headers:** `Name,Email,Phone,Company,City,IsReminderEnabled`
+- **Response (200 OK):**
+  ```json
+  {
+    "message": "2 client(s) imported successfully.",
+    "clients": [
+      {
+        "id": 2,
+        "name": "Sara Khan",
+        "email": "sara@example.com",
+        "phone": "0311-9876543",
+        "company": null,
+        "city": null,
+        "isReminderEnabled": true
+      }
+    ]
+  }
+  ```
+
+---
+
+### 📄 Invoices Management (`/api/invoices`)
+
+> All invoice queries and mutations are isolated to the authenticated user.
+
+#### 1. List Invoices
+- **URL:** `GET /api/invoices`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):**
+  ```json
+  [
+    {
+      "id": 1,
+      "invoiceNumber": "INV-20261112-A3B9",
+      "clientId": 1,
+      "clientName": "Ahmed Ali",
+      "clientEmail": "ahmed@example.com",
+      "clientPhone": "0300-1234567",
+      "clientCompany": "ACME Ltd",
+      "clientCity": "Karachi",
+      "description": "Web Development Services - Nov 2026",
+      "amount": 75000.00,
+      "issueDate": "2026-11-12",
+      "dueDate": "2026-11-26",
+      "status": "Pending",
+      "isRecurring": false,
+      "tokenExpiresAt": "2026-12-12T12:00:00Z"
+    }
+  ]
+  ```
+
+---
+
+#### 2. Get Single Invoice
+- **URL:** `GET /api/invoices/{id}`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):** Invoice object with client details.
+
+---
+
+#### 3. Create Invoice
+- **URL:** `POST /api/invoices`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Behavior:**
+  - Saves the invoice in database.
+  - Automatically generates PDF with your bank/digital wallet instructions.
+  - Sends initial email with PDF attachment and direct payment link to the client.
+- **Request Body:**
+  ```json
+  {
+    "clientId": 1,
+    "description": "Monthly retainer - Software maintenance",
+    "amount": 50000.00,
+    "issueDate": "2026-11-01",
+    "dueDate": "2026-11-15",
+    "isRecurring": true
+  }
+  ```
+- **Response (201 Created):** Created invoice object.
+
+---
+
+#### 4. Mark Invoice as Paid (Accountant Action)
+- **URL:** `PATCH /api/invoices/{id}/mark-paid`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):**
+  ```json
+  {
+    "message": "Invoice marked as paid."
+  }
+  ```
+
+---
+
+#### 5. Delete Invoice
+- **URL:** `DELETE /api/invoices/{id}`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (204 No Content):** Deleted successfully.
+
+---
+
+#### 6. Download Invoice PDF (Admin / Owner)
+- **URL:** `GET /api/invoices/{id}/pdf`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):** Binary file stream (`application/pdf`).
+
+---
+
+#### 7. Export Monthly Excel Report
+- **URL:** `GET /api/invoices/report?year=2026&month=11`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):** Binary file stream (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`).
+- **File Name:** `InvoiceReport-YYYY-MM.xlsx`
+
+---
+
+### 💳 Public Client Payment Portal (`/api/public/invoices`)
+
+> **Client Flow (Zero Login):**
+> 1. Client receives reminder/invoice email with link: `https://frontend-domain.com/pay/{token}`.
+> 2. Frontend route `/pay/:token` calls these public endpoints.
+> 3. Security: Token is SHA-256 hashed on lookup; missing or expired tokens return `404` to avoid information leakage.
+
+#### 1. Get Public Invoice Data
+- **URL:** `GET /api/public/invoices/{token}`
+- **Auth Required:** No
+- **Response (200 OK):**
+  ```json
+  {
+    "invoiceNumber": "INV-20261112-A3B9",
+    "clientName": "Ahmed Ali",
+    "description": "Monthly retainer - Software maintenance",
+    "amount": 50000.00,
+    "dueDate": "2026-11-15",
+    "status": "Pending",
+    "paymentInstructions": "HBL Bank Account: 1234-5678-9012  |  JazzCash/Easypaisa: 0300-1234567"
+  }
+  ```
+- **Response (404 Not Found):** Token is invalid or expired. Show user-friendly error: *"This payment link is invalid or has expired."*
+
+---
+
+#### 2. Download Invoice PDF (Client)
+- **URL:** `GET /api/public/invoices/{token}/pdf`
+- **Auth Required:** No
+- **Response (200 OK):** Binary PDF stream (`application/pdf`).
+
+---
+
+#### 3. Upload Payment Proof
+- **URL:** `POST /api/public/invoices/{token}/proof`
+- **Auth Required:** No
+- **Content-Type:** `multipart/form-data`
+- **Form Data Field:** `file` (JPG, PNG, or PDF, max **5 MB**)
+- **Behavior:**
+  - Validates file type and size.
+  - Stores file with random GUID name (never original filename).
+  - Updates invoice status to `"ProofSubmitted"`.
+  - Automatically suspends further reminder emails.
+- **Response (200 OK):**
+  ```json
+  {
+    "message": "Proof of payment received. The accountant will review it shortly.",
+    "proof": {
+      "id": 1,
+      "invoiceId": 12,
+      "storedFileName": "e4f2b960...jpg",
+      "fileType": "jpg",
+      "fileSize": 204850,
+      "uploadedAt": "2026-11-12T14:30:00Z",
+      "reviewStatus": "Pending",
+      "rejectReason": null,
+      "reviewedAt": null
+    }
+  }
+  ```
+- **Error Responses:**
+  - `400 Bad Request`: File missing, exceeds 5 MB, or wrong file extension.
+  - `404 Not Found`: Invalid or expired payment token.
+
+---
+
+### 🔍 Payment Proof Review (`/api/payment-proofs`)
+
+> Accountant / business owner interface to inspect and approve submitted payments.
+
+#### 1. List Proofs for Invoice
+- **URL:** `GET /api/payment-proofs/invoice/{invoiceId}`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Response (200 OK):**
+  ```json
+  [
+    {
+      "id": 1,
+      "invoiceId": 12,
+      "storedFileName": "e4f2b960...jpg",
+      "fileType": "jpg",
+      "fileSize": 204850,
+      "uploadedAt": "2026-11-12T14:30:00Z",
+      "reviewStatus": "Pending",
+      "rejectReason": null,
+      "reviewedAt": null
+    }
+  ]
+  ```
+
+---
+
+#### 2. Approve or Reject Proof
+- **URL:** `PATCH /api/payment-proofs/{id}/review`
+- **Auth Required:** Yes (`Bearer <token>`)
+- **Request Body (Approve):**
+  ```json
+  {
+    "approved": true
+  }
+  ```
+- **Request Body (Reject):**
+  ```json
+  {
+    "approved": false,
+    "rejectReason": "Transaction reference number not legible in screenshot."
+  }
+  ```
+- **Behavior:**
+  - If approved: Proof status becomes `"Approved"`, Invoice status becomes `"Paid"`.
+  - If rejected: Proof status becomes `"Rejected"`, Invoice status becomes `"Rejected"` (reminders may resume).
+- **Response (200 OK):** Updated payment proof object.
+- **Response (400 Bad Request):** If `approved: false` is sent without `rejectReason`.
+
+---
+
+## 5. Background Jobs (Hangfire)
+
+- **Dashboard:** Visit `/hangfire` in browser.
+- **Schedule:** Runs every morning at **08:00 AM UTC** (`0 8 * * *`).
+- **Automated Workflow:**
+  1. Checks pending invoices where `Client.IsReminderEnabled == true`.
+  2. Invoices due in 3 days: Sends gentle reminder + PDF attachment.
+  3. Invoices 1–3 days overdue: Sends overdue reminder.
+  4. Invoices 4+ days overdue: Sends urgent firmer reminder.
+  5. 1st of every month: Automatically generates and emails recurring invoices based on previous month's recurring templates.
