@@ -43,4 +43,20 @@ public class PaymentProofController : AuthorizedControllerBase
         var result = await _proofService.ReviewAsync(userId.Value, id, dto);
         return result == null ? NotFound() : Ok(result);
     }
+
+    /// <summary>
+    /// GET api/payment-proofs/{id}/file
+    /// Downloads/streams the proof file for accountant inspection.
+    /// </summary>
+    [HttpGet("{id:int}/file")]
+    public async Task<IActionResult> GetProofFile(int id)
+    {
+        var userId = GetCurrentUserId();
+        if (userId == null) return Unauthorized();
+
+        var file = await _proofService.GetProofFileAsync(userId.Value, id);
+        if (file == null) return NotFound();
+
+        return File(file.Value.Bytes, file.Value.ContentType, file.Value.FileName);
+    }
 }

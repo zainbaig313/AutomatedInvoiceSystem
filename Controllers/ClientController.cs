@@ -45,8 +45,15 @@ public class ClientController : AuthorizedControllerBase
             return BadRequest(new { message = "Name, email, and phone are required." });
         }
 
-        var client = await _clientService.CreateAsync(userId.Value, dto);
-        return CreatedAtAction(nameof(GetById), new { id = client.Id }, client);
+        try
+        {
+            var client = await _clientService.CreateAsync(userId.Value, dto);
+            return CreatedAtAction(nameof(GetById), new { id = client.Id }, client);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     /// <summary>PUT api/clients/{id}</summary>
@@ -56,8 +63,15 @@ public class ClientController : AuthorizedControllerBase
         var userId = GetCurrentUserId();
         if (userId == null) return Unauthorized();
 
-        var updated = await _clientService.UpdateAsync(userId.Value, id, dto);
-        return updated == null ? NotFound() : Ok(updated);
+        try
+        {
+            var updated = await _clientService.UpdateAsync(userId.Value, id, dto);
+            return updated == null ? NotFound() : Ok(updated);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     /// <summary>DELETE api/clients/{id}</summary>
@@ -67,8 +81,15 @@ public class ClientController : AuthorizedControllerBase
         var userId = GetCurrentUserId();
         if (userId == null) return Unauthorized();
 
-        var deleted = await _clientService.DeleteAsync(userId.Value, id);
-        return deleted ? NoContent() : NotFound();
+        try
+        {
+            var deleted = await _clientService.DeleteAsync(userId.Value, id);
+            return deleted ? NoContent() : NotFound();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     /// <summary>POST api/clients/import — Bulk import from CSV or Excel (form-data key: "file").</summary>

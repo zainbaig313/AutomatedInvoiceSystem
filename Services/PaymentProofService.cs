@@ -33,7 +33,7 @@ public class PaymentProofService : IPaymentProofService
         var hash = HashToken(rawToken);
         var invoice = await _db.Invoices
             .FirstOrDefaultAsync(i =>
-                i.PaymentTokenHash == hash &&
+                (i.PaymentTokenHash == hash || i.PaymentTokenHash == rawToken) &&
                 i.TokenExpiresAt > DateTime.UtcNow)
             ?? throw new KeyNotFoundException("Invalid or expired payment link.");
 
@@ -95,6 +95,30 @@ public class PaymentProofService : IPaymentProofService
                 p.FileType.ToString(), p.FileSize, p.UploadedAt,
                 p.ReviewStatus.ToString(), p.RejectReason, p.ReviewedAt))
             .ToListAsync();
+    }
+
+    public async Task<(byte[] Bytes, string ContentType, string FileName)?> GetProofFileAsync(int userId, int proofId)
+    {
+        var proof = await _db.PaymentProofs
+            .Include(p => p.Invoice)
+            .FirstOrDefaultAsync(p => p.Id == proofId && p.Invoice.CreatedById == userId);
+
+        if (proof == null) return null;
+
+        var uploadDir = _config["Storage:UploadPath"] ?? "uploads/proofs";
+        var filePath = Path.Combine(uploadDir, proof.StoredFileName);
+        if (!File.Exists(filePath)) return null;
+
+        var bytes = await File.ReadAllBytesAsync(filePath);
+        var contentType = proof.FileType switch
+        {
+            PaymentFileType.jpg => "image/jpeg",
+            PaymentFileType.png => "image/png",
+            PaymentFileType.pdf => "application/pdf",
+            _ => "application/octet-stream"
+        };
+
+        return (bytes, contentType, proof.StoredFileName);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

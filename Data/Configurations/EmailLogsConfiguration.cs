@@ -12,7 +12,7 @@ public class EmailLogsConfiguration : IEntityTypeConfiguration<EmailLog>
         builder.HasOne(u => u.Invoice)
                .WithMany()
                .HasForeignKey(i => i.InvoiceId)
-               .OnDelete(DeleteBehavior.Restrict);
+               .OnDelete(DeleteBehavior.Cascade);
 
         builder.Property(e => e.RecipientEmail)
                .HasMaxLength(150)

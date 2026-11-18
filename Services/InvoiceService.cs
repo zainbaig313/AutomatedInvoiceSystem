@@ -102,7 +102,7 @@ public class InvoiceService : IInvoiceService
             .Include(i => i.Client)
             .Include(i => i.CreatedBy)
             .FirstOrDefaultAsync(i =>
-                i.PaymentTokenHash == hash &&
+                (i.PaymentTokenHash == hash || i.PaymentTokenHash == rawToken) &&
                 i.TokenExpiresAt > DateTime.UtcNow);
 
         if (invoice == null) return null;
@@ -259,7 +259,8 @@ public class InvoiceService : IInvoiceService
             i.DueDate,
             i.Status.ToString(),
             i.IsRecurring,
-            i.TokenExpiresAt
+            i.TokenExpiresAt,
+            i.PaymentTokenHash
         );
 
     private static byte[] BuildPdf(Invoice invoice)

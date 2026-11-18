@@ -61,14 +61,21 @@ public class UserController : ControllerBase
     }
 
     /// <summary>
-    /// PUT api/users/{id} — Update name, bank, and digital wallet.
-    /// Password changes are not supported here on purpose (use a separate flow).
+    /// PUT api/users/me or api/users/{id} — Update name, bank, and digital wallet.
     /// </summary>
+    [HttpPut("me")]
     [HttpPut("{id:int}")]
     [Authorize]
-    public async Task<IActionResult> Update(int id, [FromBody] UpdateUserDto dto)
+    public async Task<IActionResult> Update([FromRoute] int? id, [FromBody] UpdateUserDto dto)
     {
-        var updated = await _userService.UpdateAsync(id, dto);
+        var idClaim = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                   ?? User.FindFirstValue("sub");
+
+        if (!int.TryParse(idClaim, out var currentUserId))
+            return Unauthorized();
+
+        var targetId = (id.HasValue && id.Value > 0) ? id.Value : currentUserId;
+        var updated = await _userService.UpdateAsync(targetId, dto);
         return updated == null ? NotFound() : Ok(updated);
     }
 }

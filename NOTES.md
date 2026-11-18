@@ -1,478 +1,568 @@
-# InvoiceFlow — API Documentation & Frontend Integration Guide
+# InvoiceFlow Backend Architecture & Complete API Flow Documentation
 
-## 1. Quick Setup & Configuration
-
-> [!IMPORTANT]
-> Configure the following in `appsettings.json` before starting the application:
-> - `Smtp:SenderEmail`: Your Gmail address (App Password is preconfigured).
-> - `App:BaseUrl`: Frontend base URL (e.g., `http://localhost:3000` or `https://yourdomain.com`) so emailed payment links direct to the frontend payment page (`/pay/{token}`).
+This document provides an end-to-end walkthrough of the **InvoiceFlow** ASP.NET Core backend. It covers every file, domain entity, data transfer object (DTO), service, controller endpoint, lifecycle flow, business rule, and database relationship.
 
 ---
 
-## 2. Authentication Architecture (For Frontend Developers)
+## 1. High-Level Architecture Overview
 
-- **Authentication Method:** JWT Bearer Token.
-- **Header Format:**
-  ```http
-  Authorization: Bearer <token>
-  ```
-- **Token Storage:** Store the returned JWT token securely (e.g., `localStorage`, `sessionStorage`, or in-memory state / HttpOnly cookies).
-- **Per-User Isolation:**
-  - All protected endpoints automatically extract the logged-in user's identity from the JWT claims.
-  - Clients, Invoices, Reports, and Proof Reviews are strictly filtered so users only access their own data.
-  - Public payment endpoints (`/api/public/invoices/...`) require **no token/login**; client access is validated via a cryptographically secure token embedded in the URL.
+InvoiceFlow is a multi-tenant invoicing, customer payment verification, and automated reminder platform built with **.NET 10**, **Entity Framework Core (SQL Server)**, **QuestPDF**, **MailKit/MimeKit**, and **Hangfire**.
 
----
-
-## 3. Enums Reference
-
-Use these string representations in JSON requests and responses:
-
-### `Bank`
-```typescript
-type Bank = "HBL" | "ASKARI" | "ALFALAH" | "UBL" | "MCB";
+```
+                           ┌───────────────────────────────┐
+                           │      HTTP Request Client      │
+                           │   (Frontend / Email Recipient)│
+                           └───────────────┬───────────────┘
+                                           │
+                                           ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ ASP.NET Core Middleware Pipeline (Program.cs)                                          │
+│   1. CORS ("AllowAll")                                                                 │
+│   2. Routing / Controller Endpoint Dispatch                                            │
+│   3. Authentication (JwtBearer Token Validation: sub, email, name)                     │
+│   4. Authorization Middleware                                                          │
+│   5. Hangfire Dashboard (/hangfire)                                                    │
+└──────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                           │
+                                           ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ Controllers                                                                            │
+│   ├── UserController           -> /api/users                                           │
+│   ├── ClientController         -> /api/clients                                         │
+│   ├── InvoiceController        -> /api/invoices                                        │
+│   ├── PaymentProofController   -> /api/payment-proofs                                  │
+│   └── PublicInvoiceController  -> /api/public/invoices                                 │
+└──────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                           │
+                                           ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ Service Layer                                                                          │
+│   ├── UserService (IUserService)               -> User registration, BCrypt, Auth      │
+│   ├── JwtService (IJwtService)                 -> JWT token signing (HMAC-SHA256)      │
+│   ├── ClientService (IClientService)           -> Client CRUD, CSV/Excel Parser        │
+│   ├── InvoiceService (IInvoiceService)         -> Token generation, Invoices, PDF, XLS │
+│   ├── EmailService (IEmailService)             -> MailKit SMTP, HTML email, PDF attach │
+│   ├── PaymentProofService (IPaymentProofServ.) -> Disk storage, File types, Reviews    │
+│   └── ReminderJob                              -> Hangfire cron job for email alerts   │
+└──────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                           │
+                                           ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ Data Access & Storage Layer                                                            │
+│   ├── ApplicationDbContext (EF Core)           -> Database context                     │
+│   ├── Entity Configurations (Fluent API)       -> Schema, primary keys, relationships  │
+│   ├── SQL Server (InvoiceManagement DB)        -> Users, Clients, Invoices, Proofs     │
+│   └── Disk Storage (uploads/proofs/)           -> Payment receipts (JPG, PNG, PDF)     │
+└────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### `InvoiceStatus`
-```typescript
-type InvoiceStatus = "Pending" | "ProofSubmitted" | "Paid" | "Rejected";
+---
+
+## 2. Domain Models, Enums & Database Entities
+
+### 2.1 Enums (`InvoiceFlow/Models/Enums/`)
+
+| Enum File | Values | Purpose |
+| :--- | :--- | :--- |
+| **`Bank.cs`** | `HBL`, `ASKARI`, `ALFALAH`, `UBL`, `MCB` | Designated receiving banks for accountant payout instructions. |
+| **`InvoiceStatus.cs`** | `Pending`, `ProofSubmitted`, `Paid`, `Rejected` | Invoice lifecycle state. |
+| **`ReviewStatus.cs`** | `Pending`, `Approved`, `Rejected` | Accountant decision on submitted proof. |
+| **`PaymentFileType.cs`**| `jpg`, `png`, `pdf` | Validated receipt formats uploaded by clients. |
+| **`EmailStatus.cs`** | `Pending`, `Sent`, `Failed` | Delivery status for audit records. |
+| **`EmailTypes.cs`** | `NewInvoice`, `Reminder`, `ProofRejected` | Category of dispatched email. |
+
+---
+
+### 2.2 Entities (`InvoiceFlow/Models/Entities/`)
+
+#### 1. `User.cs`
+* **Table**: `Users`
+* **Fields**:
+  * `int Id` (Primary Key, Identity)
+  * `string Name` (Accountant name)
+  * `string Email` (Accountant login email, unique)
+  * `string PasswordHash` (BCrypt password hash)
+  * `Bank Bank` (Designated payout bank)
+  * `string? BankAccountNumber` (IBAN / Account Number)
+  * `string? DigitalWallet` (EasyPaisa / JazzCash / Mobile number)
+* **Relationships**:
+  * Owns multiple `Clients` (`CreatedById`).
+  * Owns multiple `Invoices` (`CreatedById`).
+
+#### 2. `Client.cs`
+* **Table**: `Clients`
+* **Fields**:
+  * `int Id` (Primary Key)
+  * `string Name` (Customer name)
+  * `string Email` (Customer email)
+  * `string Phone` (Customer phone)
+  * `string? Company` (Company / business name)
+  * `string? City` (City name)
+  * `bool IsReminderEnabled` (Toggles automated reminder emails)
+  * `int CreatedById` (Foreign Key referencing `Users.Id`)
+* **Relationships**:
+  * Belongs to `User` (`CreatedBy`).
+  * Has many `Invoices`.
+
+#### 3. `Invoice.cs`
+* **Table**: `Invoices`
+* **Fields**:
+  * `int Id` (Primary Key)
+  * `string InvoiceNumber` (Unique formatted identifier: `INV-YYYYMMDD-XXXX`)
+  * `int ClientId` (Foreign Key referencing `Clients.Id`)
+  * `int CreatedById` (Foreign Key referencing `Users.Id`)
+  * `string Description` (Services / line items)
+  * `decimal Amount` (Invoice amount)
+  * `DateOnly IssueDate` (Date issued)
+  * `DateOnly DueDate` (Payment deadline)
+  * `InvoiceStatus Status` (`Pending`, `ProofSubmitted`, `Paid`, `Rejected`)
+  * `bool IsRecurring` (Toggles monthly auto-regeneration)
+  * `string PaymentTokenHash` (SHA-256 hash of the 32-byte public access token)
+  * `DateTime TokenExpiresAt` (Token validity cutoff, typically 30 days)
+* **Relationships**:
+  * Belongs to `Client` (`Client`).
+  * Belongs to `User` (`CreatedBy`).
+  * Has many `PaymentProofs`.
+  * Has many `EmailLogs`.
+
+#### 4. `PaymentProof.cs`
+* **Table**: `PaymentProofs`
+* **Fields**:
+  * `int Id` (Primary Key)
+  * `int InvoiceId` (Foreign Key referencing `Invoices.Id`)
+  * `string StoredFileName` (UUID filename on disk: `{guid}.{ext}`)
+  * `PaymentFileType FileType` (`jpg`, `png`, `pdf`)
+  * `long FileSize` (Bytes, max 5MB)
+  * `DateTime UploadedAt` (Timestamp)
+  * `ReviewStatus ReviewStatus` (`Pending`, `Approved`, `Rejected`)
+  * `string? RejectReason` (Mandatory if rejected)
+  * `DateTime? ReviewedAt` (Timestamp of review)
+* **Relationships**:
+  * Belongs to `Invoice`.
+
+#### 5. `EmailLog.cs`
+* **Table**: `EmailLogs`
+* **Fields**:
+  * `int Id` (Primary Key)
+  * `int InvoiceId` (Foreign Key referencing `Invoices.Id`)
+  * `string RecipientEmail` (Customer email address)
+  * `EmailTypes EmailType` (`NewInvoice`, `Reminder`, `ProofRejected`)
+  * `EmailStatus Status` (`Sent`, `Failed`)
+  * `int Attempts` (Number of send attempts)
+  * `string? ErrorMessage` (Null or empty on success; error text on failure)
+  * `DateTime OccurredAt` (Timestamp)
+
+---
+
+## 3. Data Transfer Objects (DTOs)
+
+Located in `InvoiceFlow/Models/DTOs/`:
+
+### User DTOs (`UserDtos.cs`)
+* `LoginRequestDto(string Email, string Password)`
+* `LoginResponse(string Name, string Email, string Token)`
+* `CreateUserDto(string Name, string Email, string Password, Bank Bank, string? BankAccountNumber, string? DigitalWallet)`
+* `UpdateUserDto(string Name, Bank Bank, string? BankAccountNumber, string? DigitalWallet)`
+* `UserResponseDto(int Id, string Name, string Email, string Bank, string? BankAccountNumber, string? DigitalWallet)`
+
+### Client DTOs (`ClientDtos.cs`)
+* `CreateClientDto(string Name, string Email, string Phone, string? Company, string? City, bool IsReminderEnabled = true)`
+* `UpdateClientDto(string Name, string Email, string Phone, string? Company, string? City, bool IsReminderEnabled)`
+* `ClientResponseDto(int Id, string Name, string Email, string Phone, string? Company, string? City, bool IsReminderEnabled)`
+
+### Invoice DTOs (`InvoiceDtos.cs`)
+* `CreateInvoiceDto(int ClientId, string Description, decimal Amount, DateOnly IssueDate, DateOnly DueDate, bool IsRecurring)`
+* `UpdateInvoiceStatusDto(InvoiceStatus Status)`
+* `InvoiceResponseDto(int Id, string InvoiceNumber, int ClientId, string ClientName, string ClientEmail, string ClientPhone, string? ClientCompany, string? ClientCity, string Description, decimal Amount, DateOnly IssueDate, DateOnly DueDate, string Status, bool IsRecurring, DateTime TokenExpiresAt)`
+* `PublicInvoiceDto(string InvoiceNumber, string ClientName, string Description, decimal Amount, DateOnly DueDate, string Status, string PaymentInstructions)`
+
+### Payment Proof DTOs (`PaymentProofDtos.cs`)
+* `PaymentProofResponseDto(int Id, int InvoiceId, string StoredFileName, string FileType, long FileSize, DateTime UploadedAt, string ReviewStatus, string? RejectReason, DateTime? ReviewedAt)`
+* `ReviewProofDto(bool Approved, string? RejectReason)`
+
+---
+
+## 4. End-to-End API Workflows & Request Processing
+
+---
+
+### Workflow 1: Authentication & User Registration
+
+```
+[Client POST /api/users/login]
+        │
+        ▼
+UserController.Login(LoginRequestDto)
+        │
+        ├── 1. Validates Email & Password are non-empty
+        ├── 2. Calls IUserService.LoginAsync(dto)
+        │       ├── Queries User by Email in Users table
+        │       ├── Verifies password hash using BCrypt.Verify
+        │       └── Calls IJwtService.GenerateToken(user)
+        │               └── Signs claims (Sub=UserId, Email, Name) using HMAC-SHA256
+        ▼
+Returns HTTP 200 OK: { name, email, token }
 ```
 
-### `ReviewStatus`
-```typescript
-type ReviewStatus = "Pending" | "Approved" | "Rejected";
+```
+[Client POST /api/users]
+        │
+        ▼
+UserController.Create(CreateUserDto)
+        │
+        ├── 1. Validates Name, Email, Password presence
+        ├── 2. Calls IUserService.CreateAsync(dto)
+        │       ├── Hashes password using BCrypt.HashPassword
+        │       ├── Creates User entity with Bank, Account, Wallet
+        │       ├── Saves to Users table (ApplicationDbContext)
+        │       └── Maps to UserResponseDto
+        ▼
+Returns HTTP 201 CreatedAtAction (pointing to /api/users/me)
 ```
 
-### `PaymentFileType`
-```typescript
-type PaymentFileType = "jpg" | "png" | "pdf";
+```
+[Client GET /api/users/me] (Requires Bearer Token)
+        │
+        ▼
+UserController.GetMe()
+        │
+        ├── 1. Reads 'sub' claim from ClaimsPrincipal
+        ├── 2. Calls IUserService.GetByIdAsync(userId)
+        ▼
+Returns HTTP 200 OK (UserResponseDto)
+```
+
+```
+[Client PUT /api/users/me or /api/users/{id}] (Requires Bearer Token)
+        │
+        ▼
+UserController.Update(id?, UpdateUserDto)
+        │
+        ├── 1. Parses current userId from token
+        ├── 2. Resolves targetId (uses id parameter or falls back to authenticated user)
+        ├── 3. Calls IUserService.UpdateAsync(targetId, dto)
+        │       ├── Updates Name, Bank, BankAccountNumber, DigitalWallet
+        │       └── Saves changes to DB
+        ▼
+Returns HTTP 200 OK (Updated UserResponseDto)
 ```
 
 ---
 
-## 4. Endpoints Specification
+### Workflow 2: Client Management & Bulk Import
 
-### 👤 Users & Authentication (`/api/users`)
+```
+[Client POST /api/clients] (Requires Bearer Token)
+        │
+        ▼
+ClientController.Create(CreateClientDto)
+        │
+        ├── 1. Extracts logged-in userId (AuthorizedControllerBase.GetCurrentUserId())
+        ├── 2. Validates Name, Email, Phone
+        ├── 3. Calls IClientService.CreateAsync(userId, dto)
+        │       ├── Builds Client entity with CreatedById = userId
+        │       ├── Saves to Clients table
+        │       └── Maps to ClientResponseDto
+        ▼
+Returns HTTP 201 CreatedAtAction (/api/clients/{id})
+```
 
-#### 1. Login
-- **URL:** `POST /api/users/login`
-- **Auth Required:** No
-- **Request Body:**
-  ```json
-  {
-    "email": "zain@123gmail.com",
-    "password": "yourpassword"
-  }
-  ```
-- **Response (200 OK):**
-  ```json
-  {
-    "name": "Zain Baig",
-    "email": "zain@123gmail.com",
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-  }
-  ```
-- **Error Responses:**
-  - `400 Bad Request`: Email and password are required.
-  - `401 Unauthorized`: Invalid email or password.
-
----
-
-#### 2. Register Account
-- **URL:** `POST /api/users`
-- **Auth Required:** No (Open for registration / onboarding)
-- **Request Body:**
-  ```json
-  {
-    "name": "Zain Baig",
-    "email": "zain@example.com",
-    "password": "StrongPassword123",
-    "bank": "HBL",
-    "bankAccountNumber": "1234-5678-9012",
-    "digitalWallet": "0300-1234567"
-  }
-  ```
-- **Response (201 Created):**
-  ```json
-  {
-    "id": 1,
-    "name": "Zain Baig",
-    "email": "zain@example.com",
-    "bank": "HBL",
-    "bankAccountNumber": "1234-5678-9012",
-    "digitalWallet": "0300-1234567"
-  }
-  ```
+```
+[Client POST /api/clients/import] (Requires Bearer Token, multipart/form-data)
+        │
+        ▼
+ClientController.BulkImport(IFormFile file)
+        │
+        ├── 1. Extracts logged-in userId
+        ├── 2. Validates file presence and extension (.csv, .xlsx, .xls)
+        ├── 3. Calls IClientService.BulkImportAsync(userId, stream, fileName)
+        │       ├── If CSV:
+        │       │    Reads lines, skips header, parses Name, Email, Phone, Company, City, IsReminderEnabled
+        │       ├── If Excel:
+        │       │    Uses ClosedXML (XLWorkbook) to iterate rows starting at row 2
+        │       ├── Checks existing emails for this specific userId
+        │       ├── Filters out duplicates (leaves other users' clients unaffected)
+        │       ├── Inserts new records into Clients table
+        │       └── Maps to List<ClientResponseDto>
+        ▼
+Returns HTTP 200 OK: { message: "N client(s) imported successfully.", clients: [...] }
+```
 
 ---
 
-#### 3. Get Current User Profile
-- **URL:** `GET /api/users/me`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):**
-  ```json
-  {
-    "id": 1,
-    "name": "Zain Baig",
-    "email": "zain@example.com",
-    "bank": "HBL",
-    "bankAccountNumber": "1234-5678-9012",
-    "digitalWallet": "0300-1234567"
-  }
-  ```
-- **Error Responses:**
-  - `401 Unauthorized`
-  - `404 Not Found`
+### Workflow 3: Invoice Creation, PDF Generation & Email Dispatch
+
+This is the central process of the application:
+
+```
+[Client POST /api/invoices] (Requires Bearer Token)
+        │
+        ▼
+InvoiceController.Create(CreateInvoiceDto)
+        │
+        ├── 1. Extracts logged-in userId
+        ├── 2. Calls IInvoiceService.CreateAsync(userId, dto)
+        │       │
+        │       ├── A. Generates Unique Invoice Number:
+        │       │      Format: "INV-YYYYMMDD-XXXX" (random uppercase hex suffix)
+        │       │
+        │       ├── B. Generates Cryptographically Secure Token:
+        │       │      32 random bytes via RandomNumberGenerator
+        │       │      Converted to URL-safe base64 string (rawToken)
+        │       │      Computes SHA-256 hash: HashToken(rawToken) -> PaymentTokenHash
+        │       │
+        │       ├── C. Creates Invoice Entity:
+        │       │      ClientId = dto.ClientId, CreatedById = userId
+        │       │      Status = InvoiceStatus.Pending
+        │       │      TokenExpiresAt = DateTime.UtcNow.AddDays(30)
+        │       │      Saves Invoice to Invoices table
+        │       │
+        │       ├── D. Dispatches Invoice Email (IEmailService.SendInvoiceEmailAsync):
+        │       │      ├── Resolves scoped InvoiceService to avoid circular DI
+        │       │      ├── Calls InvoiceService.GeneratePdfInternalAsync(invoiceId)
+        │       │      │     └── Uses QuestPDF to compile official invoice PDF document
+        │       │      ├── Builds Customer Public URL: {BaseUrl}/pay/{rawToken}
+        │       │      ├── Builds HTML Email with bank details, line items, and pay button
+        │       │      ├── Connects to SMTP (MailKit, StartTls, Gmail credentials)
+        │       │      ├── Attaches compiled PDF: "{InvoiceNumber}.pdf"
+        │       │      ├── Sends email message
+        │       │      └── Inserts record into EmailLogs table:
+        │       │            Status = Sent, ErrorMessage = ""
+        │       │            (Catches any SMTP network exceptions gracefully so creation succeeds)
+        │       │
+        │       └── E. Loads navigation property (Client) and returns InvoiceResponseDto
+        ▼
+Returns HTTP 201 CreatedAtAction (/api/invoices/{id})
+```
 
 ---
 
-#### 4. Update Profile & Payment Details
-- **URL:** `PUT /api/users/{id}`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Note:** Updates user details such as bank name, account number, and digital wallet (JazzCash/Easypaisa). Invoices and PDFs automatically pull these instructions.
-- **Request Body:**
-  ```json
-  {
-    "name": "Zain Baig",
-    "bank": "MCB",
-    "bankAccountNumber": "9999-0000-1111",
-    "digitalWallet": "0321-9876543"
-  }
-  ```
-- **Response (200 OK):**
-  ```json
-  {
-    "id": 1,
-    "name": "Zain Baig",
-    "email": "zain@example.com",
-    "bank": "MCB",
-    "bankAccountNumber": "9999-0000-1111",
-    "digitalWallet": "0321-9876543"
-  }
-  ```
+### Workflow 4: Public Customer Invoice View & PDF Download
+
+When the customer receives their billing email, they click the embedded link:
+
+```
+[Customer opens /pay/{token}]
+        │
+        ▼
+Frontend calls: GET /api/public/invoices/{token}
+        │
+        ▼
+PublicInvoiceController.GetByToken(token)
+        │
+        ├── 1. Computes SHA-256 hash of provided token: HashToken(rawToken)
+        ├── 2. Queries Invoices table matching:
+        │       PaymentTokenHash == hash AND TokenExpiresAt > DateTime.UtcNow
+        │       (Includes Client and CreatedBy/User navigation properties)
+        ├── 3. If missing or expired -> Returns HTTP 404 Not Found
+        ├── 4. Builds payment instructions from the accountant's profile:
+        │       - Bank name
+        │       - Account / IBAN number
+        │       - Digital wallet (EasyPaisa / JazzCash)
+        └── 5. Maps to PublicInvoiceDto (excludes internal database IDs)
+        ▼
+Returns HTTP 200 OK:
+{
+  invoiceNumber: "INV-20261113-EBCC",
+  clientName: "Acme Corp",
+  description: "Web development services",
+  amount: 50000,
+  dueDate: "2026-11-27",
+  status: "Pending",
+  paymentInstructions: "Bank: HBL\nAccount: PK36HABB...\nWallet: 0300-1234567"
+}
+```
+
+```
+[Customer clicks Download PDF]
+        │
+        ▼
+PublicInvoiceController.DownloadPdf(token)
+        │
+        ├── 1. Verifies token validity and expiration
+        ├── 2. Generates PDF via QuestPDF
+        ▼
+Returns HTTP 200 FileStreamResult: application/pdf ("INV-20261113-EBCC.pdf")
+```
 
 ---
 
-### 👥 Clients Management (`/api/clients`)
+### Workflow 5: Proof of Payment Upload & Verification
 
-> All client operations are scoped to the authenticated user.
+```
+[Customer uploads payment receipt file on /pay/{token}]
+        │
+        ▼
+PublicInvoiceController.UploadProof(token, IFormFile file)
+        │
+        ├── 1. Calls IPaymentProofService.UploadAsync(token, file)
+        │       ├── A. Validates MIME type:
+        │       │      "image/jpeg" -> PaymentFileType.jpg
+        │       │      "image/png"  -> PaymentFileType.png
+        │       │      "application/pdf" -> PaymentFileType.pdf
+        │       │      Throws error if invalid extension
+        │       ├── B. Validates file size: Max 5 MB (5 * 1024 * 1024 bytes)
+        │       ├── C. Validates payment token hash and expiration
+        │       ├── D. Generates safe unique filename: $"{Guid.NewGuid():N}{extension}"
+        │       ├── E. Saves physical file to disk directory: "uploads/proofs/"
+        │       ├── F. Inserts PaymentProof record:
+        │       │      ReviewStatus = ReviewStatus.Pending
+        │       │      UploadedAt = DateTime.UtcNow
+        │       ├── G. Updates Invoice Status:
+        │       │      Invoice.Status = InvoiceStatus.ProofSubmitted
+        │       │      (Crucial: This automatically halts automated reminder emails)
+        │       └── H. Saves DB context changes
+        ▼
+Returns HTTP 200 OK:
+{
+  message: "Proof of payment received. The accountant will review it shortly.",
+  proof: PaymentProofResponseDto
+}
+```
 
-#### 1. List Clients
-- **URL:** `GET /api/clients`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):**
-  ```json
-  [
-    {
-      "id": 1,
-      "name": "Ahmed Ali",
-      "email": "ahmed@example.com",
-      "phone": "0300-1234567",
-      "company": "ACME Ltd",
-      "city": "Karachi",
-      "isReminderEnabled": true
-    }
-  ]
-  ```
+```
+[Accountant reviews proof in Invoices management dashboard]
+        │
+        ▼
+1. Fetch Proofs: GET /api/payment-proofs/invoice/{invoiceId}
+   - Verifies invoice belongs to logged-in user.
+   - Returns list of PaymentProofResponseDto.
 
----
+2. Inspect File: GET /api/payment-proofs/{proofId}/file
+   - Verifies invoice ownership.
+   - Reads bytes from uploads/proofs/ and streams file with proper Content-Type.
 
-#### 2. Get Single Client
-- **URL:** `GET /api/clients/{id}`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):** Client object.
-- **Response (404 Not Found):** If ID doesn't exist or belongs to another user.
-
----
-
-#### 3. Create Client
-- **URL:** `POST /api/clients`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Request Body:**
-  ```json
-  {
-    "name": "Ahmed Ali",
-    "email": "ahmed@example.com",
-    "phone": "0300-1234567",
-    "company": "ACME Ltd",
-    "city": "Karachi",
-    "isReminderEnabled": true
-  }
-  ```
-- **Response (201 Created):** Created client object with assigned `id`.
-
----
-
-#### 4. Update Client
-- **URL:** `PUT /api/clients/{id}`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Request Body:**
-  ```json
-  {
-    "name": "Ahmed Ali",
-    "email": "ahmed_updated@example.com",
-    "phone": "0300-1234567",
-    "company": "ACME Global",
-    "city": "Lahore",
-    "isReminderEnabled": false
-  }
-  ```
-- **Response (200 OK):** Updated client object.
+3. Submit Decision: PATCH /api/payment-proofs/{proofId}/review
+   Body: { approved: true } OR { approved: false, rejectReason: "Blurry screenshot" }
+        │
+        ▼
+PaymentProofController.Review(id, ReviewProofDto)
+        │
+        ├── Validates rejectReason is provided if approved == false
+        ├── Updates PaymentProof:
+        │    ReviewStatus = Approved or Rejected
+        │    RejectReason = null or rejectReason
+        │    ReviewedAt = DateTime.UtcNow
+        ├── Updates Invoice:
+        │    Invoice.Status = Approved ? InvoiceStatus.Paid : InvoiceStatus.Rejected
+        └── Saves changes to DB
+        ▼
+Returns HTTP 200 OK (PaymentProofResponseDto)
+```
 
 ---
 
-#### 5. Delete Client
-- **URL:** `DELETE /api/clients/{id}`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (204 No Content):** Deleted successfully.
-- **Response (404 Not Found):** Client not found or not owned by user.
+### Workflow 6: Automated Background Reminders & Recurring Invoices (Hangfire)
+
+Configured in `Program.cs` and executed by `ReminderJob.cs` daily at 8:00 AM UTC (`0 8 * * *`):
+
+```
+                       ┌────────────────────────────┐
+                       │ Hangfire Recurring Trigger │
+                       │    (Daily at 8:00 AM UTC)  │
+                       └──────────────┬─────────────┘
+                                      │
+                                      ▼
+                             ReminderJob.RunAsync()
+                                      │
+        ┌─────────────────────────────┴─────────────────────────────┐
+        │                                                           │
+        ▼                                                           ▼
+[1. Check Pending Invoices]                             [2. Auto-Create Recurring]
+  Filters Invoices where:                                 Runs ONLY if today is the 1st
+  Status == Pending AND                                   of the month (today.Day == 1):
+  Client.IsReminderEnabled == true                                  │
+        │                                                           ▼
+  Calculates days relative to DueDate:                    Queries recurring invoices from
+                                                          last month (IsRecurring == true)
+  Case A: DueDate is in exactly 3 days                              │
+    -> Sends gentle reminder email                                  ▼
+                                                          Creates new invoice for today:
+  Case B: Overdue by 1 to 3 days                           - IssueDate = today
+    -> Sends first overdue reminder                        - DueDate = today + 30 days
+                                                           - Dispatches new invoice email
+  Case C: Overdue by 4+ days                               - Attaches fresh PDF
+    -> Sends firm final overdue notice
+```
 
 ---
 
-#### 6. Bulk Import Clients
-- **URL:** `POST /api/clients/import`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Content-Type:** `multipart/form-data`
-- **Form Data Field:** `file` (Supports `.csv`, `.xlsx`, `.xls`)
-- **CSV Headers:** `Name,Email,Phone,Company,City,IsReminderEnabled`
-- **Response (200 OK):**
-  ```json
-  {
-    "message": "2 client(s) imported successfully.",
-    "clients": [
-      {
-        "id": 2,
-        "name": "Sara Khan",
-        "email": "sara@example.com",
-        "phone": "0311-9876543",
-        "company": null,
-        "city": null,
-        "isReminderEnabled": true
-      }
-    ]
-  }
-  ```
+### Workflow 7: Accounting Excel Export
+
+```
+[Accountant requests Monthly Report: GET /api/invoices/report?year=2026&month=11]
+        │
+        ▼
+InvoiceController.MonthlyReport(year, month)
+        │
+        ├── 1. Validates year >= 2000 and month between 1 and 12
+        ├── 2. Extracts authenticated userId
+        ├── 3. Calls IInvoiceService.ExportMonthlyReportAsync(userId, year, month)
+        │       ├── Calculates date range: 1st of month to last day of month
+        │       ├── Queries invoices matching userId and IssueDate in range
+        │       ├── Builds Excel spreadsheet using ClosedXML:
+        │       │     - Adds worksheet: "{year}-{month:D2} Report"
+        │       │     - Formats header row: Dark slate gray background, white bold text
+        │       │     - Populates columns:
+        │       │         1. Invoice #
+        │       │         2. Client Name
+        │       │         3. Client Email
+        │       │         4. Client Phone
+        │       │         5. Description
+        │       │         6. Amount (PKR)
+        │       │         7. Issue Date
+        │       │         8. Due Date
+        │       │         9. Status (flags as "Overdue" if past due and still Pending)
+        │       └── Writes workbook to byte array
+        ▼
+Returns HTTP 200 File:
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+Filename: "InvoiceReport-2026-11.xlsx"
+```
 
 ---
 
-### 📄 Invoices Management (`/api/invoices`)
+## 5. Security & Multi-Tenancy Architecture
 
-> All invoice queries and mutations are isolated to the authenticated user.
-
-#### 1. List Invoices
-- **URL:** `GET /api/invoices`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):**
-  ```json
-  [
-    {
-      "id": 1,
-      "invoiceNumber": "INV-20261112-A3B9",
-      "clientId": 1,
-      "clientName": "Ahmed Ali",
-      "clientEmail": "ahmed@example.com",
-      "clientPhone": "0300-1234567",
-      "clientCompany": "ACME Ltd",
-      "clientCity": "Karachi",
-      "description": "Web Development Services - Nov 2026",
-      "amount": 75000.00,
-      "issueDate": "2026-11-12",
-      "dueDate": "2026-11-26",
-      "status": "Pending",
-      "isRecurring": false,
-      "tokenExpiresAt": "2026-12-12T12:00:00Z"
-    }
-  ]
-  ```
+| Security Domain | Mechanism | Implementation Details |
+| :--- | :--- | :--- |
+| **Password Storage** | BCrypt | `BCrypt.Net.BCrypt.HashPassword` / `Verify`. Salt generated per user; cleartext passwords are never stored. |
+| **Authentication** | JWT Bearer Tokens | Validates issuer, audience, and symmetric security key. Tokens carry user `sub`, `email`, and `name`. |
+| **Data Isolation** | Multi-Tenant Scoping | Every `Client` and `Invoice` has a foreign key `CreatedById`. Controllers inherit from `AuthorizedControllerBase` and scope every SELECT, UPDATE, and DELETE query to `CreatedById == currentUserId`. |
+| **Public Portal Auth**| Opaque SHA-256 Tokens | Public customer links do not expose database integer IDs. They use 32-byte cryptographically secure random tokens. Only the SHA-256 hash is persisted in the database. |
+| **File Upload Safety** | MIME Verification & GUIDs | Uploads strictly validate MIME types (`image/jpeg`, `image/png`, `application/pdf`) and enforce a 5 MB ceiling. Files are renamed to random GUIDs on disk to prevent path traversal or overwrites. |
 
 ---
 
-#### 2. Get Single Invoice
-- **URL:** `GET /api/invoices/{id}`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):** Invoice object with client details.
+## 6. Directory File Map
 
----
-
-#### 3. Create Invoice
-- **URL:** `POST /api/invoices`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Behavior:**
-  - Saves the invoice in database.
-  - Automatically generates PDF with your bank/digital wallet instructions.
-  - Sends initial email with PDF attachment and direct payment link to the client.
-- **Request Body:**
-  ```json
-  {
-    "clientId": 1,
-    "description": "Monthly retainer - Software maintenance",
-    "amount": 50000.00,
-    "issueDate": "2026-11-01",
-    "dueDate": "2026-11-15",
-    "isRecurring": true
-  }
-  ```
-- **Response (201 Created):** Created invoice object.
-
----
-
-#### 4. Mark Invoice as Paid (Accountant Action)
-- **URL:** `PATCH /api/invoices/{id}/mark-paid`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):**
-  ```json
-  {
-    "message": "Invoice marked as paid."
-  }
-  ```
-
----
-
-#### 5. Delete Invoice
-- **URL:** `DELETE /api/invoices/{id}`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (204 No Content):** Deleted successfully.
-
----
-
-#### 6. Download Invoice PDF (Admin / Owner)
-- **URL:** `GET /api/invoices/{id}/pdf`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):** Binary file stream (`application/pdf`).
-
----
-
-#### 7. Export Monthly Excel Report
-- **URL:** `GET /api/invoices/report?year=2026&month=11`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):** Binary file stream (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`).
-- **File Name:** `InvoiceReport-YYYY-MM.xlsx`
-
----
-
-### 💳 Public Client Payment Portal (`/api/public/invoices`)
-
-> **Client Flow (Zero Login):**
-> 1. Client receives reminder/invoice email with link: `https://frontend-domain.com/pay/{token}`.
-> 2. Frontend route `/pay/:token` calls these public endpoints.
-> 3. Security: Token is SHA-256 hashed on lookup; missing or expired tokens return `404` to avoid information leakage.
-
-#### 1. Get Public Invoice Data
-- **URL:** `GET /api/public/invoices/{token}`
-- **Auth Required:** No
-- **Response (200 OK):**
-  ```json
-  {
-    "invoiceNumber": "INV-20261112-A3B9",
-    "clientName": "Ahmed Ali",
-    "description": "Monthly retainer - Software maintenance",
-    "amount": 50000.00,
-    "dueDate": "2026-11-15",
-    "status": "Pending",
-    "paymentInstructions": "HBL Bank Account: 1234-5678-9012  |  JazzCash/Easypaisa: 0300-1234567"
-  }
-  ```
-- **Response (404 Not Found):** Token is invalid or expired. Show user-friendly error: *"This payment link is invalid or has expired."*
-
----
-
-#### 2. Download Invoice PDF (Client)
-- **URL:** `GET /api/public/invoices/{token}/pdf`
-- **Auth Required:** No
-- **Response (200 OK):** Binary PDF stream (`application/pdf`).
-
----
-
-#### 3. Upload Payment Proof
-- **URL:** `POST /api/public/invoices/{token}/proof`
-- **Auth Required:** No
-- **Content-Type:** `multipart/form-data`
-- **Form Data Field:** `file` (JPG, PNG, or PDF, max **5 MB**)
-- **Behavior:**
-  - Validates file type and size.
-  - Stores file with random GUID name (never original filename).
-  - Updates invoice status to `"ProofSubmitted"`.
-  - Automatically suspends further reminder emails.
-- **Response (200 OK):**
-  ```json
-  {
-    "message": "Proof of payment received. The accountant will review it shortly.",
-    "proof": {
-      "id": 1,
-      "invoiceId": 12,
-      "storedFileName": "e4f2b960...jpg",
-      "fileType": "jpg",
-      "fileSize": 204850,
-      "uploadedAt": "2026-11-12T14:30:00Z",
-      "reviewStatus": "Pending",
-      "rejectReason": null,
-      "reviewedAt": null
-    }
-  }
-  ```
-- **Error Responses:**
-  - `400 Bad Request`: File missing, exceeds 5 MB, or wrong file extension.
-  - `404 Not Found`: Invalid or expired payment token.
-
----
-
-### 🔍 Payment Proof Review (`/api/payment-proofs`)
-
-> Accountant / business owner interface to inspect and approve submitted payments.
-
-#### 1. List Proofs for Invoice
-- **URL:** `GET /api/payment-proofs/invoice/{invoiceId}`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Response (200 OK):**
-  ```json
-  [
-    {
-      "id": 1,
-      "invoiceId": 12,
-      "storedFileName": "e4f2b960...jpg",
-      "fileType": "jpg",
-      "fileSize": 204850,
-      "uploadedAt": "2026-11-12T14:30:00Z",
-      "reviewStatus": "Pending",
-      "rejectReason": null,
-      "reviewedAt": null
-    }
-  ]
-  ```
-
----
-
-#### 2. Approve or Reject Proof
-- **URL:** `PATCH /api/payment-proofs/{id}/review`
-- **Auth Required:** Yes (`Bearer <token>`)
-- **Request Body (Approve):**
-  ```json
-  {
-    "approved": true
-  }
-  ```
-- **Request Body (Reject):**
-  ```json
-  {
-    "approved": false,
-    "rejectReason": "Transaction reference number not legible in screenshot."
-  }
-  ```
-- **Behavior:**
-  - If approved: Proof status becomes `"Approved"`, Invoice status becomes `"Paid"`.
-  - If rejected: Proof status becomes `"Rejected"`, Invoice status becomes `"Rejected"` (reminders may resume).
-- **Response (200 OK):** Updated payment proof object.
-- **Response (400 Bad Request):** If `approved: false` is sent without `rejectReason`.
-
----
-
-## 5. Background Jobs (Hangfire)
-
-- **Dashboard:** Visit `/hangfire` in browser.
-- **Schedule:** Runs every morning at **08:00 AM UTC** (`0 8 * * *`).
-- **Automated Workflow:**
-  1. Checks pending invoices where `Client.IsReminderEnabled == true`.
-  2. Invoices due in 3 days: Sends gentle reminder + PDF attachment.
-  3. Invoices 1–3 days overdue: Sends overdue reminder.
-  4. Invoices 4+ days overdue: Sends urgent firmer reminder.
-  5. 1st of every month: Automatically generates and emails recurring invoices based on previous month's recurring templates.
+```
+InvoiceFlow/
+├── Controllers/
+│   ├── AuthorizedControllerBase.cs  # Shared helper extracting current user ID from JWT claims
+│   ├── UserController.cs            # Auth (login, register, me, update profile)
+│   ├── ClientController.cs          # Client CRUD and CSV/Excel bulk import
+│   ├── InvoiceController.cs         # Invoice CRUD, mark-paid, PDF download, Excel reports
+│   ├── PaymentProofController.cs    # Proof review and file download
+│   └── PublicInvoiceController.cs   # Public token-authenticated invoice view & proof upload
+├── Services/
+│   ├── Interfaces/                  # Service contracts (IUserService, IInvoiceService, etc.)
+│   ├── UserService.cs               # Authentication, user creation and profile updates
+│   ├── JwtService.cs                # JWT signing and claim construction
+│   ├── ClientService.cs             # Client management, CSV reader, ClosedXML parser
+│   ├── InvoiceService.cs            # Invoice numbers, SHA-256 token hashing, QuestPDF engine
+│   ├── EmailService.cs              # MailKit SMTP client, email templates, PDF attachment
+│   ├── PaymentProofService.cs       # File storage, validation, review transitions
+│   └── ReminderJob.cs               # Hangfire cron task for daily reminders & recurring invoices
+├── Models/
+│   ├── Entities/                    # User, Client, Invoice, PaymentProof, EmailLog
+│   ├── DTOs/                        # Request / response records
+│   └── Enums/                       # Bank, InvoiceStatus, ReviewStatus, PaymentFileType, etc.
+├── Data/
+│   ├── ApplicationDbContext.cs      # EF Core DbContext with DbSets
+│   └── Configurations/              # Fluent API entity configurations
+├── Migrations/                      # EF Core schema migration history
+├── uploads/proofs/                  # Storage directory for uploaded customer receipts
+├── appsettings.json                 # Connection strings, JWT secrets, SMTP credentials
+└── Program.cs                       # DI registration, CORS, JWT config, Hangfire pipeline
+```

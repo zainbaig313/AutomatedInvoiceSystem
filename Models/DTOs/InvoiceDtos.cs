@@ -27,7 +27,8 @@ public record InvoiceResponseDto(
     DateOnly DueDate,
     string Status,
     bool IsRecurring,
-    DateTime TokenExpiresAt
+    DateTime TokenExpiresAt,
+    string PaymentTokenHash
 );
 
 // Returned to anonymous clients via payment link — no internal IDs

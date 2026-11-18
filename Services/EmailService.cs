@@ -83,23 +83,49 @@ public class EmailService : IEmailService
 
         message.Body = builder.ToMessageBody();
 
-        using var smtp = new SmtpClient();
-        await smtp.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-        await smtp.AuthenticateAsync(senderEmail, password);
-        await smtp.SendAsync(message);
-        await smtp.DisconnectAsync(quit: true);
-
-        // Log the successful send
-        _db.EmailLogs.Add(new EmailLog
+        try
         {
-            InvoiceId     = invoice.Id,
-            RecipientEmail = invoice.Client.Email,
-            EmailType     = emailType,
-            Status        = EmailStatus.Sent,
-            Attempts      = 1,
-            OccurredAt    = DateTime.UtcNow
-        });
-        await _db.SaveChangesAsync();
+            using var smtp = new SmtpClient();
+            await smtp.ConnectAsync(host, port, SecureSocketOptions.StartTls);
+            await smtp.AuthenticateAsync(senderEmail, password);
+            await smtp.SendAsync(message);
+            await smtp.DisconnectAsync(quit: true);
+
+            // Log the successful send
+            _db.EmailLogs.Add(new EmailLog
+            {
+                InvoiceId      = invoice.Id,
+                RecipientEmail = invoice.Client.Email,
+                EmailType      = emailType,
+                Status         = EmailStatus.Sent,
+                Attempts       = 1,
+                ErrorMessage   = "",
+                OccurredAt     = DateTime.UtcNow
+            });
+            await _db.SaveChangesAsync();
+        }
+        catch (Exception ex)
+        {
+            // Log failure without crashing invoice creation flow
+            try
+            {
+                _db.EmailLogs.Add(new EmailLog
+                {
+                    InvoiceId      = invoice.Id,
+                    RecipientEmail = invoice.Client.Email,
+                    EmailType      = emailType,
+                    Status         = EmailStatus.Failed,
+                    Attempts       = 1,
+                    ErrorMessage   = ex.Message.Length > 500 ? ex.Message[..500] : ex.Message,
+                    OccurredAt     = DateTime.UtcNow
+                });
+                await _db.SaveChangesAsync();
+            }
+            catch
+            {
+                // Ignore secondary logging errors
+            }
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

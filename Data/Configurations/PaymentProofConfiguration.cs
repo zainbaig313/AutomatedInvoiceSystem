@@ -10,7 +10,7 @@ public class PaymentProofConfiguration : IEntityTypeConfiguration<PaymentProof>
         builder.HasOne(u => u.Invoice)
                 .WithMany()
                 .HasForeignKey(i => i.InvoiceId)
-                .OnDelete(DeleteBehavior.Restrict);
+                .OnDelete(DeleteBehavior.Cascade);
 
 
        

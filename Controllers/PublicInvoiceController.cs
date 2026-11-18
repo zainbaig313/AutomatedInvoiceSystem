@@ -51,7 +51,7 @@ public class PublicInvoiceController : ControllerBase
         var hash = HashToken(token);
         var invoice = await _db.Invoices
             .FirstOrDefaultAsync(i =>
-                i.PaymentTokenHash == hash &&
+                (i.PaymentTokenHash == hash || i.PaymentTokenHash == token) &&
                 i.TokenExpiresAt > DateTime.UtcNow);
 
         if (invoice == null) return NotFound();

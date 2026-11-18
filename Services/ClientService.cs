@@ -10,13 +10,18 @@ public class ClientService : IClientService
 
     public async Task<ClientResponseDto> CreateAsync(int userId, CreateClientDto dto)
     {
+        var emailNormalized = dto.Email.Trim().ToLowerInvariant();
+        var exists = await _db.Clients.AnyAsync(c => c.CreatedById == userId && c.Email.ToLower() == emailNormalized);
+        if (exists)
+            throw new InvalidOperationException($"You already have a client with email '{dto.Email.Trim()}'.");
+
         var client = new Client
         {
-            Name = dto.Name,
-            Email = dto.Email,
-            Phone = dto.Phone,
-            Company = dto.Company,
-            City = dto.City,
+            Name = dto.Name.Trim(),
+            Email = dto.Email.Trim(),
+            Phone = dto.Phone.Trim(),
+            Company = dto.Company?.Trim(),
+            City = dto.City?.Trim(),
             IsReminderEnabled = dto.IsReminderEnabled,
             CreatedById = userId
         };
@@ -50,11 +55,16 @@ public class ClientService : IClientService
             .FirstOrDefaultAsync(c => c.Id == id && c.CreatedById == userId);
         if (client == null) return null;
 
-        client.Name = dto.Name;
-        client.Email = dto.Email;
-        client.Phone = dto.Phone;
-        client.Company = dto.Company;
-        client.City = dto.City;
+        var emailNormalized = dto.Email.Trim().ToLowerInvariant();
+        var emailTaken = await _db.Clients.AnyAsync(c => c.CreatedById == userId && c.Id != id && c.Email.ToLower() == emailNormalized);
+        if (emailTaken)
+            throw new InvalidOperationException($"You already have another client with email '{dto.Email.Trim()}'.");
+
+        client.Name = dto.Name.Trim();
+        client.Email = dto.Email.Trim();
+        client.Phone = dto.Phone.Trim();
+        client.Company = dto.Company?.Trim();
+        client.City = dto.City?.Trim();
         client.IsReminderEnabled = dto.IsReminderEnabled;
 
         await _db.SaveChangesAsync();
@@ -66,6 +76,12 @@ public class ClientService : IClientService
         var client = await _db.Clients
             .FirstOrDefaultAsync(c => c.Id == id && c.CreatedById == userId);
         if (client == null) return false;
+
+        var hasInvoices = await _db.Invoices.AnyAsync(i => i.ClientId == id);
+        if (hasInvoices)
+        {
+            throw new InvalidOperationException("Cannot delete this client because they have existing invoices. Please delete the invoices first.");
+        }
 
         _db.Clients.Remove(client);
         await _db.SaveChangesAsync();

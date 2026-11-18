@@ -15,9 +15,8 @@ public class ClientConfiguration : IEntityTypeConfiguration<Client>
                 .HasMaxLength(150)
                 .IsRequired();
 
-        // Email is unique per user, not globally — two users could add the same client email
-        // If you want global uniqueness remove this index
-        builder.HasIndex(u => u.Email)
+        // Email is unique per user (CreatedById), not globally — two different users can add clients with the same email
+        builder.HasIndex(u => new { u.Email, u.CreatedById })
                 .IsUnique();
 
         builder.Property(u => u.Phone)

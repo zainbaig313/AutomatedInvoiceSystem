@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum Bank
 {
     HBL,
@@ -6,4 +9,3 @@ public enum Bank
     UBL,
     MCB
 }
-

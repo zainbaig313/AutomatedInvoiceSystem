@@ -14,3 +14,4 @@ obj/
 ## Uploads/uploads directory if desired (can keep folder with .gitkeep)
 uploads/proofs/*
 !uploads/proofs/.gitkeep
+

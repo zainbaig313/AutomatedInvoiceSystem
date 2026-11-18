@@ -44,7 +44,23 @@ builder.Services.AddScoped<IPaymentProofService, PaymentProofService>();
 builder.Services.AddScoped<ReminderJob>();
 
 // ── Controllers ───────────────────────────────────────────────────────────────
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.Converters.Add(
+            new System.Text.Json.Serialization.JsonStringEnumConverter());
+    });
+
+// ── CORS ──────────────────────────────────────────────────────────────────────
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
 
 // ── JWT Authentication ────────────────────────────────────────────────────────
 var secret = builder.Configuration["Jwt:Secret"]
@@ -72,6 +88,7 @@ builder.Services.AddAuthorization();
 // ── Build ─────────────────────────────────────────────────────────────────────
 var app = builder.Build();
 
+app.UseCors("AllowAll");
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
